@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Alloy Property Predictor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg: #0f1216;
+    --panel: #171b20;
+    --panel-border: #262c33;
+    --text: #e8ecef;
+    --muted: #8a95a1;
+    --accent: #5ad1c4;   /* alloy-teal */
+    --accent-2: #f2b134;  /* carbide-gold */
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); padding: 28px 20px 60px;
+  }
+  h1{ font-size:1.6rem; margin:0 0 4px; }
+  h1 span{ color: var(--accent); }
+  .subtitle{ color: var(--muted); margin:0 0 24px; font-size:0.95rem; max-width: 700px; }
+  .layout{
+    display:grid; grid-template-columns: 380px 1fr; gap:20px; max-width:1180px; margin:0 auto;
+  }
+  @media (max-width:850px){ .layout{ grid-template-columns:1fr; } }
+  .panel{ background:var(--panel); border:1px solid var(--panel-border); border-radius:10px; padding:20px; }
+  .slider-row{ margin-bottom:16px; }
+  .slider-label{
+    display:flex; justify-content:space-between; font-size:0.82rem; color:var(--muted);
+    margin-bottom:4px; text-transform:uppercase; letter-spacing:0.4px;
+  }
+  .slider-label .val{ color: var(--text); font-weight:600; }
+  input[type=range]{ width:100%; accent-color: var(--accent); }
+  .result{ text-align:center; padding: 20px 0 8px; border-top:1px solid var(--panel-border); margin-top:10px; }
+  .result .big{ font-size:2.8rem; font-weight:700; color:var(--accent); line-height:1; }
+  .result .unit{ color:var(--muted); font-size:0.85rem; margin-top:4px; }
+  .result .hb{ color: var(--accent-2); font-size:1rem; margin-top:8px; }
+  .presets{ display:flex; gap:6px; flex-wrap:wrap; margin: 12px 0 6px; }
+  .preset-btn{
+    background:#0c0f12; border:1px solid var(--panel-border); color:var(--text);
+    padding:6px 10px; border-radius:999px; font-size:0.72rem; cursor:pointer;
+  }
+  .preset-btn:hover{ border-color:var(--accent); color:var(--accent); }
+  canvas{ max-height:380px; }
+  .caption{ font-size:0.78rem; color:var(--muted); margin-top:14px; line-height:1.5; }
+  .footer-note{
+    max-width:1180px; margin:30px auto 0; color:var(--muted); font-size:0.78rem; line-height:1.6;
+    border-top:1px solid var(--panel-border); padding-top:16px;
+  }
+</style>
+</head>
+<body>
+
+<h1><span>Alloy</span> Property Predictor</h1>
+<p class="subtitle">Adjust alloying element content (wt%) and get a live yield-strength estimate from a
+regression model trained on composition data — the browser-side sibling of a full
+Random-Forest + SHAP analysis done in Python.</p>
+
+<div class="layout">
+  <div class="panel">
+    <div class="presets">
+      <button class="preset-btn" data-preset="plain">Plain carbon</button>
+      <button class="preset-btn" data-preset="lowalloy">Low-alloy (4140-like)</button>
+      <button class="preset-btn" data-preset="hsla">HSLA (V-treated)</button>
+    </div>
+    <div id="sliders"></div>
+    <div class="result">
+      <div class="big"><span id="ysValue">--</span></div>
+      <div class="unit">Predicted yield strength (MPa)</div>
+      <div class="hb">≈ <span id="hbValue">--</span> HB (est. hardness)</div>
+    </div>
+    <p class="caption">
+      Linear-regression estimate, embedded from coefficients trained in
+      <code>train_model.py</code> (5-fold CV R² ≈ 0.96 on the synthetic training set).
+      The full project also fits a Random Forest and explains it with SHAP for
+      non-linear feature interactions — see the Python script for that analysis.
+    </p>
+  </div>
+
+  <div class="panel">
+    <canvas id="chart"></canvas>
+  </div>
+</div>
+
+<div class="footer-note">
+  Dataset is synthetically generated from physically-motivated solid-solution-strengthening
+  coefficients (see <code>generate_dataset.py</code>) — a stand-in for a real experimental
+  alloy database, used here to build and demonstrate the full ML pipeline end to end.
+</div>
+
+<script>
+// Coefficients trained by train_model.py (linear_model_coeffs.json)
+const MODEL = {
+  intercept: 353.0,
+  coefficients: { C: 443.59, Mn: 34.35, Si: 53.04, Cr: 47.56, Ni: 27.07, Mo: 90.52, V: 173.35 }
+};
+
+const RANGES = {
+  C:  {min:0.05, max:1.2, step:0.01, default:0.3},
+  Mn: {min:0.3,  max:2.0, step:0.01, default:1.0},
+  Si: {min:0.1,  max:1.5, step:0.01, default:0.3},
+  Cr: {min:0.0,  max:5.0, step:0.01, default:0.5},
+  Ni: {min:0.0,  max:4.0, step:0.01, default:0.2},
+  Mo: {min:0.0,  max:1.0, step:0.01, default:0.1},
+  V:  {min:0.0,  max:0.3, step:0.005,default:0.02},
+};
+
+const PRESETS = {
+  plain:    {C:0.45, Mn:0.7, Si:0.2, Cr:0.0, Ni:0.0, Mo:0.0, V:0.0},
+  lowalloy: {C:0.40, Mn:0.9, Si:0.25,Cr:1.0, Ni:0.0, Mo:0.2, V:0.0},
+  hsla:     {C:0.15, Mn:1.4, Si:0.3, Cr:0.3, Ni:0.1, Mo:0.1, V:0.08},
+};
+
+const sliderEls = {};
+const slidersContainer = document.getElementById("sliders");
+
+Object.keys(RANGES).forEach(el => {
+  const r = RANGES[el];
+  const row = document.createElement("div");
+  row.className = "slider-row";
+  row.innerHTML = `
+    <div class="slider-label"><span>${el}</span><span class="val" id="val-${el}">${r.default}</span></div>
+    <input type="range" id="slider-${el}" min="${r.min}" max="${r.max}" step="${r.step}" value="${r.default}">
+  `;
+  slidersContainer.appendChild(row);
+  sliderEls[el] = row.querySelector("input");
+});
+
+function currentComposition(){
+  const comp = {};
+  Object.keys(RANGES).forEach(el => comp[el] = parseFloat(sliderEls[el].value));
+  return comp;
+}
+
+function predict(comp){
+  let ys = MODEL.intercept;
+  Object.keys(comp).forEach(el => { ys += MODEL.coefficients[el] * comp[el]; });
+  return ys;
+}
+
+let chart;
+function initChart(){
+  const ctx = document.getElementById("chart").getContext("2d");
+  chart = new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: Object.keys(RANGES),
+      datasets: [{
+        label: "Contribution to yield strength (MPa)",
+        data: [],
+        backgroundColor: "#5ad1c4",
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      indexAxis: "y",
+      scales: {
+        x: { title:{display:true, text:"MPa contributed", color:"#8a95a1"}, ticks:{color:"#8a95a1"}, grid:{color:"#262c33"} },
+        y: { ticks:{color:"#e8ecef"}, grid:{color:"#262c33"} }
+      },
+      plugins: {
+        legend: { display:false },
+        title: { display:true, text:"Element contribution breakdown (this composition)", color:"#e8ecef", font:{size:14} }
+      }
+    }
+  });
+}
+
+function update(){
+  const comp = currentComposition();
+  Object.keys(comp).forEach(el => { document.getElementById(`val-${el}`).textContent = comp[el].toFixed(el === "V" ? 3 : 2); });
+
+  const ys = predict(comp);
+  document.getElementById("ysValue").textContent = Math.round(ys);
+  document.getElementById("hbValue").textContent = Math.round(ys / 3.45);
+
+  const contributions = Object.keys(comp).map(el => MODEL.coefficients[el] * comp[el]);
+  chart.data.datasets[0].data = contributions;
+  chart.update();
+}
+
+Object.values(sliderEls).forEach(el => el.addEventListener("input", update));
+document.querySelectorAll(".preset-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const preset = PRESETS[btn.dataset.preset];
+    Object.keys(preset).forEach(el => { sliderEls[el].value = preset[el]; });
+    update();
+  });
+});
+
+initChart();
+update();
+</script>
+</body>
+</html>
